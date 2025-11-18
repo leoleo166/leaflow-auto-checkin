@@ -14,12 +14,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import TimeoutException
 import requests
 from datetime import datetime
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# 重试配置：从环境变量读取，默认3次
+RETRY_TIMES = int(os.getenv('RETRY_TIMES', '3'))
 
 class LeaflowAutoCheckin:
     def __init__(self, email, password):
@@ -447,31 +451,60 @@ class LeaflowAutoCheckin:
             return f"获取签到结果时出错: {str(e)}"
     
     def run(self):
-        """单个账号执行流程"""
-        try:
-            logger.info(f"开始处理账号")
-            
-            # 登录
-            if self.login():
-                # 签到
-                result = self.checkin()
-                
-                # 获取余额
-                balance = self.get_balance()
-                
-                logger.info(f"签到结果: {result}, 余额: {balance}")
-                return True, result, balance
-            else:
-                raise Exception("登录失败")
-                
-        except Exception as e:
-            error_msg = f"自动签到失败: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg, "未知"
+        """单个账号执行流程（带重试机制）"""
+        last_exception = None
         
+        try:
+            # 重试机制：最多重试RETRY_TIMES次
+            for attempt in range(RETRY_TIMES):
+                try:
+                    if attempt > 0:
+                        logger.info(f"开始第 {attempt + 1}/{RETRY_TIMES} 次重试...")
+                        # 重试前重新初始化浏览器
+                        if self.driver:
+                            try:
+                                self.driver.quit()
+                            except:
+                                pass
+                        self.setup_driver()
+                        time.sleep(2)  # 重试前等待2秒
+                    else:
+                        logger.info(f"开始处理账号（最多重试 {RETRY_TIMES} 次）")
+                    
+                    # 登录
+                    if self.login():
+                        # 签到
+                        result = self.checkin()
+                        
+                        # 获取余额
+                        balance = self.get_balance()
+                        
+                        logger.info(f"签到结果: {result}, 余额: {balance}")
+                        return True, result, balance
+                    else:
+                        raise Exception("登录失败")
+                        
+                except Exception as e:
+                    last_exception = e
+                    error_msg = f"自动签到失败: {str(e)}"
+                    
+                    if attempt < RETRY_TIMES - 1:
+                        wait_minutes = 5 * (attempt + 1)  # 5分钟、10分钟、15分钟...
+                        wait_seconds = wait_minutes * 60
+                        logger.warning(f"第 {attempt + 1} 次尝试失败: {error_msg}，将在 {wait_minutes} 分钟后重试...")
+                        time.sleep(wait_seconds)  # 指数退避：5分钟、10分钟、15分钟...
+                    else:
+                        logger.error(f"所有 {RETRY_TIMES} 次尝试均失败，最后一次错误: {error_msg}")
+            
+            # 所有重试都失败
+            return False, f"自动签到失败（已重试 {RETRY_TIMES} 次）: {str(last_exception)}", "未知"
+            
         finally:
             if self.driver:
-                self.driver.quit()
+                try:
+                    self.driver.quit()
+                except:
+                    pass
 
 class MultiAccountManager:
     """多账号管理器 - 简化配置版本"""
